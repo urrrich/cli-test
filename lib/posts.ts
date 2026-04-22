@@ -9,6 +9,111 @@ export type Post = {
 
 export const POSTS: Post[] = [
   {
+    slug: 'anatomy-of-a-harness',
+    title: '解剖一个 Agent Harness：七个零件与它们的设计空间',
+    date: '2026-04-22',
+    tags: ['技术', 'AI', 'Agent', 'Harness'],
+    excerpt:
+      '如果说"harness 是模型之外的那一层"，那它具体长什么样？这篇把一个典型的 coding agent harness 拆成七个零件——事件循环、上下文管理、工具层、权限系统、Hook、状态持久化、错误恢复——逐一聊聊它们在做什么、有哪些设计选择、以及踩过的坑。配套前一篇《聊聊 Agent 的 Harness》一起读更佳。',
+    contentHTML: `<p>上一篇《聊聊 Agent 的"Harness"》讲了一个观点：<em>同一个模型装进不同 harness，体感能差出一个时代</em>。那篇是概念普及，这篇往下沉一层——真把一个 harness 拆开，它里面都有什么？</p>
+<p>下面这七个零件，是我观察 Claude Code、Cursor、Aider、Cline 等一票 coding agent 之后，抽出来的相对稳定的结构。不一定是唯一的划法，但这样拆能解释大部分你在用的时候踩到的坑。</p>
+<h2>零件一：事件循环（Event Loop）</h2>
+<p>最核心、也最容易被忽略的一层。它的工作简单粗暴：</p>
+<ol>
+<li>把上下文发给模型 → 拿回一段 assistant 消息 + 可能的 tool calls</li>
+<li>如果有 tool calls，执行它们 → 把结果拼回上下文</li>
+<li>循环，直到模型不再发起 tool call（或者超过预算、被打断）</li>
+</ol>
+<p>听起来像一个 while 循环，真写起来全是决策点：</p>
+<ul>
+<li><strong>并发策略</strong>：多个 tool call 并行还是串行？并行的话，怎么处理同一个文件的读写竞争？</li>
+<li><strong>中断语义</strong>：用户按 Ctrl-C 时，正在跑的 tool 要不要 kill？已经跑完没回填的结果怎么办？</li>
+<li><strong>预算控制</strong>：最大 token / 最大轮次 / 最大时间，哪个先到就停？</li>
+<li><strong>流式</strong>：模型流式吐字时，tool call 提前解析出来能不能抢跑？</li>
+</ul>
+<p>很多 agent 用起来"感觉慢"，根因都在这一层：循环被写成了严格串行，本来能并行查的 5 个文件被排成队一个个跑。</p>
+<h2>零件二：上下文管理（Context Manager）</h2>
+<p>如果说事件循环是心脏，上下文管理就是它的血液循环。</p>
+<p>上下文窗口永远是稀缺资源。一个好的 context manager 要做几件事：</p>
+<ul>
+<li><strong>分层组装</strong>：system prompt / 长期记忆 / 当前任务 / 工具结果，各自的"保鲜期"不一样，拼接顺序和可丢弃性也不一样</li>
+<li><strong>缓存对齐</strong>：前缀越稳定，prompt cache 命中率越高。harness 要刻意把"稳定的东西"放在前面，"易变的东西"放在后面</li>
+<li><strong>压缩时机</strong>：什么时候对长对话做摘要？是主动在逼近上限前压，还是被动等到溢出再压？</li>
+<li><strong>淘汰策略</strong>：老的文件读取结果、过期的命令输出，是全删、摘要化、还是换成"占位符"？</li>
+</ul>
+<p>这里的隐藏坑是"<strong>信息时效性</strong>"。文件读过了，三轮对话之后它在磁盘上可能已经变了。harness 要决定：是让模型默认信任旧读取，还是在每次写之前强制重读一次？两种策略背后是完全不同的工程观念。</p>
+<h2>零件三：工具层（Tool Layer）</h2>
+<p>模型能做什么，完全取决于你给它哪些工具。工具层有三件事做得好不好，直接决定了 agent 的"手感"。</p>
+<h3>3.1 工具的颗粒度</h3>
+<p>一个极端是"一个万能工具"——<code>execute_anything(command)</code>。另一个极端是"几十个细分工具"——<code>Read / Edit / Write / Grep / Glob / Bash</code>……</p>
+<p>我的经验：<strong>细分工具对模型更友好</strong>。每个工具的入参语义清晰，错误信息也能专门优化。万能工具看着灵活，实际上让模型每次都要"想一下怎么调"，出错率更高。</p>
+<h3>3.2 工具的错误信息</h3>
+<p>工具失败时，返回的不是原始 stderr，而是<strong>经过整理的、对模型有帮助的信息</strong>。举例：</p>
+<ul>
+<li>Edit 失败因为 old_string 没匹配上 → 告诉它"没找到该字符串，建议先 Read 一下确认内容"</li>
+<li>Bash 超时 → 告诉它"命令运行超过 X 秒，如果是长任务请加 run_in_background"</li>
+<li>Read 的文件太大 → 告诉它"文件 N 行，建议用 offset/limit 分段读"</li>
+</ul>
+<p>每条错误信息其实是一次"对模型的微教学"。好的 harness 在这里会花大量心思。</p>
+<h3>3.3 工具描述里的"纪律"</h3>
+<p>一条工具的 description 不只是解释它是什么，更是在约束模型怎么用它。"<em>这个工具不应该用于 X，请改用 Y</em>"这种话，会真的影响模型的选择。harness 设计者要承担一部分"产品经理"的角色。</p>
+<h2>零件四：权限系统（Permission System）</h2>
+<p>真正让 agent 敢在生产环境跑起来的，是这一层。</p>
+<p>典型的权限模型分几个等级：</p>
+<ul>
+<li><strong>自动放行</strong>：只读类操作，Read / Glob / Grep，默认不打扰用户</li>
+<li><strong>首次确认后记住</strong>：<code>npm test</code>、<code>git status</code> 这种"这次项目里你总会用到的命令"</li>
+<li><strong>每次都确认</strong>：<code>git push</code>、<code>rm -rf</code>、外部网络请求这类破坏性或越界操作</li>
+<li><strong>硬禁止</strong>：写系统关键路径、改 git config、禁用 hook 等——有些事再怎么确认也不能做</li>
+</ul>
+<p>设计这套体系的难点在于：<strong>颗粒度不能太粗也不能太细</strong>。太粗（"允许所有 Bash"）不安全，太细（每条命令都要确认）用户会抓狂。折中方案通常是"按命令前缀 + 按目录范围"做白名单。</p>
+<h2>零件五：Hook 机制（Hooks）</h2>
+<p>Hook 是 harness 暴露给用户的"可编程表面"。</p>
+<p>常见的 hook 时机：</p>
+<ul>
+<li><strong>工具调用前</strong>：检查参数、拒绝不符合规范的调用（比如 commit 必须带某个 trailer）</li>
+<li><strong>工具调用后</strong>：做 lint、做 format、在每次写文件之后自动跑 typecheck</li>
+<li><strong>会话开始 / 结束</strong>：加载项目约定、上报使用统计</li>
+<li><strong>用户提交前</strong>：注入项目特定的 system prompt</li>
+</ul>
+<p>Hook 的哲学意义在于：<em>它让 harness 的规则从"厂商写死"变成"用户可定义"</em>。好的 hook 系统让每个团队都能把自己的工程规约刻进 agent 的行为里，而不是靠"每次提醒模型记住"这种脆弱的方式。</p>
+<h2>零件六：状态持久化（State）</h2>
+<p>Agent 的状态有哪些？拍脑袋列一下就不少：</p>
+<ul>
+<li>会话 transcript（能不能恢复、能不能回放）</li>
+<li>跨会话记忆（项目级 CLAUDE.md、用户级偏好）</li>
+<li>权限决策（"这个命令以后不要再问我"）</li>
+<li>工作区元数据（当前分支、打开的文件、pending 的 plan）</li>
+<li>后台任务句柄（那个跑在后台的 dev server 怎么找回来）</li>
+</ul>
+<p>这里的关键设计问题是<strong>范围（scope）</strong>：哪些状态属于"这次会话"、哪些属于"这个项目"、哪些属于"这个用户"、哪些属于"这台机器"。搞错一层，就会出现"我在公司记的偏好跑回家就丢了"或者"私密项目的配置泄露到了公共仓库"这类事故。</p>
+<h2>零件七：错误恢复（Error Recovery）</h2>
+<p>这是区分"能演示"和"能生产"的分水岭。</p>
+<p>典型的崩溃场景：</p>
+<ul>
+<li>API 429 / 5xx → 要不要重试？指数退避还是立即重试？</li>
+<li>Context 溢出 → 自动触发压缩还是报错让用户手动处理？</li>
+<li>工具执行时宿主进程挂了 → 下次启动能不能接着跑？</li>
+<li>用户 Ctrl-C → 是"优雅中断（让模型说一句再停）"还是"立刻 kill"？</li>
+<li>流式响应读到一半断网 → 已经生成的部分要不要保留？</li>
+</ul>
+<p>错误恢复很多时候是"品味"的体现。同样是 context 溢出，一个 harness 直接报错让你抓狂，另一个无声地做了一次智能压缩、你甚至都没感觉到——后者不是运气，是明确设计过的。</p>
+<h2>七个零件的化学反应</h2>
+<p>这七个零件孤立看都不难，难的是它们<strong>互相之间的耦合</strong>：</p>
+<ul>
+<li>上下文管理 × 缓存 = prompt cache 命中率</li>
+<li>工具层 × 权限 = 每条工具都要有清晰的权限等级</li>
+<li>Hook × 事件循环 = hook 执行时间会阻塞整个循环，异步化要谨慎</li>
+<li>状态持久化 × 错误恢复 = 崩溃时状态必须是"一致的断点"，否则恢复只会更乱</li>
+</ul>
+<p>你能感觉到：一个 harness 的工程复杂度，其实来自"组合爆炸"，而不是单个零件的难度。</p>
+<h2>一个不算结论的结论</h2>
+<p>回到最初那个问题："为什么同一个模型在不同 harness 里差这么多？"</p>
+<p>答案是：因为 harness 上面这七个零件的每一个，都有十几种合理的设计选择；它们两两组合又会带出新的取舍。<strong>一个 harness 最终长什么样，是设计者在几百个小决策上累积出的"品味印记"。</strong></p>
+<p>如果你也在写 agent，建议有意识地问自己：我这个 harness 的这七个零件，各自做到什么水平了？哪个是瓶颈？哪个是我自己都没认真想过的地方？</p>
+<p>模型会越来越聪明，但<strong>harness 是你自己的作品</strong>——它才是你能真正做出差异化的地方。</p>`,
+  },
+  {
     slug: 'openclaw-personal-ai-assistant',
     title: 'OpenClaw：把 AI 助手装进你每天在用的那些聊天软件里',
     date: '2026-04-22',
