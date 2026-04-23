@@ -1,7 +1,8 @@
 export default function Footer() {
+  const year = new Date().getFullYear();
   return (
     <footer className="site-footer">
-      <div className="container">© 2026 Sher · Built with ❤️</div>
+      <div className="container">© {year} Sher · Built with ❤️</div>
     </footer>
   );
 }

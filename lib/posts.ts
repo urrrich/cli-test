@@ -551,7 +551,7 @@ c++;                      // 不会触发更新——c 是解构出来的普通�
   },
   {
     slug: 'vue-3-getting-started',
-    title: 'Vue 3 入门：从 Options API 到 Composition API',
+    title: '从 Options 到 Composition：Vue 3 组件写法的分叉点',
     date: '2026-04-21',
     tags: ['Vue', '前端', '技术', 'JavaScript'],
     excerpt:
@@ -655,15 +655,21 @@ export function useCounter(initial = 0, step = 1) {
   function increment() {
     count.value += step;
   }
+  function decrement() {
+    count.value -= step;
+  }
+  function reset() {
+    count.value = initial;
+  }
 
-  return { count, doubled, increment };
+  return { count, doubled, increment, decrement, reset };
 }
 </code></pre>
 <p>然后在任何组件里直接用：</p>
 <pre><code>&lt;script setup&gt;
 import { useCounter } from '@/composables/useCounter';
 
-const { count, doubled, increment } = useCounter(0, 2);
+const { count, doubled, increment, decrement, reset } = useCounter(0, 2);
 &lt;/script&gt;
 </code></pre>
 <p>这种 composable 函数就是 Vue 3 版本的"逻辑复用单元"，比 Vue 2 时代的 mixin 清晰得多——数据流完全靠返回值和参数，不存在命名冲突和"这个字段从哪来的"问题。</p>
